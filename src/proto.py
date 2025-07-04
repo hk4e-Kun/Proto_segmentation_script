@@ -40,13 +40,13 @@ class GenshinProtoSplitter:
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            print(f"配置文件加载成功: {config_file}")
+            print(f"配置加载完成")
             return config
         except FileNotFoundError:
-            print(f"配置文件不存在: {config_file}，使用默认配置")
+            print(f"配置文件不存在，使用默认配置")
             return self._get_default_config()
         except json.JSONDecodeError as e:
-            print(f"配置文件格式错误: {e}，使用默认配置")
+            print(f"配置文件格式错误，使用默认配置")
             return self._get_default_config()
     
     def _get_default_config(self) -> Dict[str, Any]:
@@ -64,7 +64,7 @@ class GenshinProtoSplitter:
             "csv_format": {
                 "header": True,
                 "delimiter": ",",
-                "fields": ["message_name", "cmd_id", "message_type", "description"]
+                "fields": ["message_name", "cmd_id"]
             },
             "parsing": {
                 "preserve_comments": True,
@@ -95,7 +95,7 @@ class GenshinProtoSplitter:
         log_level = getattr(logging, self.config["output"]["log_level"], logging.INFO)
         logging.basicConfig(
             level=log_level,
-            format='%(asctime)s - %(levelname)s - %(message)s'
+            format='%(message)s'
         )
         self.logger = logging.getLogger(__name__)
     
@@ -106,7 +106,6 @@ class GenshinProtoSplitter:
             try:
                 with open(filepath, 'r', encoding=encoding) as f:
                     content = f.read()
-                self.logger.info(f"成功使用 {encoding} 编码读取文件")
                 return content
             except (UnicodeDecodeError, UnicodeError):
                 continue
@@ -138,8 +137,7 @@ class GenshinProtoSplitter:
         enums_count = len([d for d in self.definitions if d['type'] == 'enum'])
         cmd_count = len(self.cmd_messages)
         
-        self.logger.info(f"解析完成：找到 {messages_count} 个message定义，{enums_count} 个enum定义")
-        self.logger.info(f"其中有CmdId的消息: {cmd_count} 个")
+        print(f"解析完成: {messages_count} 个message, {enums_count} 个enum, {cmd_count} 个有CmdId")
     
     def _parse_definitions(self, content: str) -> None:
         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
@@ -157,7 +155,6 @@ class GenshinProtoSplitter:
                 cmd_id = self._extract_cmd_id(line)
                 if cmd_id:
                     current_cmd_id = cmd_id
-                    self.logger.debug(f"找到CmdId: {current_cmd_id}")
                 i += 1
                 continue
             
@@ -353,9 +350,6 @@ class GenshinProtoSplitter:
                             deps.add(match)
             
             self.type_dependencies[definition['name']] = deps
-            
-            if deps:
-                self.logger.debug(f"{definition['name']} 依赖: {', '.join(deps)}")
     
     def _get_definition_imports(self, definition_name: str) -> List[str]:
         imports = []
@@ -370,7 +364,7 @@ class GenshinProtoSplitter:
     def create_output_structure(self) -> None:
         self.version_dir.mkdir(parents=True, exist_ok=True)
         self.protocol_dir.mkdir(parents=True, exist_ok=True)
-        self.logger.info(f"创建输出目录: {self.version_dir}")
+        print(f"输出目录: {self.version_dir}")
     
     def generate_proto_files(self) -> None:
         extension = self.config["proto_file_extension"]
@@ -382,7 +376,6 @@ class GenshinProtoSplitter:
             filepath = self.protocol_dir / filename
             
             if filepath.exists() and not overwrite:
-                self.logger.warning(f"文件已存在，跳过: {filename}")
                 continue
             
             content_parts = []
@@ -425,7 +418,7 @@ class GenshinProtoSplitter:
             with open(filepath, 'w', encoding=output_encoding) as f:
                 f.write('\n'.join(content_parts))
         
-        self.logger.info(f"生成了 {len(self.definitions)} 个proto文件")
+        print(f"生成 {len(self.definitions)} 个proto文件")
     
     def generate_csv_report(self) -> None:
         csv_config = self.config["csv_format"]
@@ -434,21 +427,11 @@ class GenshinProtoSplitter:
         with open(self.csv_file, 'w', newline='', encoding=output_encoding) as f:
             writer = csv.writer(f, delimiter=csv_config["delimiter"])
             
+            # 写入表头（如果配置要求）
             if csv_config["header"]:
-                headers = []
-                for field in csv_config["fields"]:
-                    if field == "message_name":
-                        headers.append("消息名称")
-                    elif field == "cmd_id":
-                        headers.append("命令ID")
-                    elif field == "message_type":
-                        headers.append("消息类型")
-                    elif field == "description":
-                        headers.append("描述")
-                    else:
-                        headers.append(field)
-                writer.writerow(headers)
+                writer.writerow(csv_config["fields"])
             
+            # 只写入有CmdId的消息，按CmdId排序
             cmd_definitions = [d for d in self.definitions if d['cmd_id']]
             cmd_definitions.sort(key=lambda x: int(x['cmd_id']))
             
@@ -459,85 +442,57 @@ class GenshinProtoSplitter:
                         row.append(definition['name'])
                     elif field == "cmd_id":
                         row.append(definition['cmd_id'])
-                    elif field == "message_type":
-                        row.append(definition['message_type'])
-                    elif field == "description":
-                        row.append(definition['description'])
-                    else:
-                        row.append(definition.get(field, ''))
-                writer.writerow(row)
-            
-            data_definitions = [d for d in self.definitions if not d['cmd_id']]
-            for definition in data_definitions:
-                row = []
-                for field in csv_config["fields"]:
-                    if field == "message_name":
-                        row.append(definition['name'])
-                    elif field == "cmd_id":
-                        row.append("")
-                    elif field == "message_type":
-                        row.append(definition['message_type'])
-                    elif field == "description":
-                        row.append(definition['description'])
                     else:
                         row.append(definition.get(field, ''))
                 writer.writerow(row)
         
-        self.logger.info(f"生成CSV报告: {self.csv_file}")
-        self.logger.info(f"包含 {len(cmd_definitions)} 个有CmdId的消息，{len(data_definitions)} 个数据结构")
+        print(f"生成CSV: {self.csv_file} (包含 {len(cmd_definitions)} 个有CmdId的消息)")
     
     def run(self) -> None:
         try:
-            self.logger.info("开始处理原神Proto文件分割")
-            self.logger.info(f"输入文件: {self.input_file}")
-            self.logger.info(f"版本: {self.version}")
+            print("开始处理原神Proto文件")
+            print(f"输入文件: {self.input_file}")
+            print(f"版本: {self.version}")
             
             if not os.path.exists(self.input_file):
                 raise FileNotFoundError(f"输入文件不存在: {self.input_file}")
             
-            self.logger.info("步骤 1: 解析proto文件...")
+            print("解析proto文件...")
             self.parse_proto_file()
             
-            self.logger.info("步骤 2: 创建输出目录...")
+            print("创建输出目录...")
             self.create_output_structure()
             
-            self.logger.info("步骤 3: 生成proto文件...")
+            print("生成proto文件...")
             self.generate_proto_files()
             
-            self.logger.info("步骤 4: 生成CSV报告...")
+            print("生成CSV报告...")
             self.generate_csv_report()
             
-            self.logger.info("原神Proto文件分割完成！")
-            self.logger.info(f"输出目录: {self.version_dir}")
+            print("处理完成！")
             
             self._print_final_statistics()
             
         except Exception as e:
-            self.logger.error(f"处理过程中发生错误: {e}")
+            print(f"处理过程中发生错误: {e}")
             raise
     
     def _print_final_statistics(self) -> None:
-        print("\n" + "="*50)
-        print("处理完成统计")
-        print("="*50)
+        print("\n" + "="*40)
+        print("统计信息")
+        print("="*40)
         print(f"版本: {self.version}")
-        print(f"输入文件: {self.input_file}")
         print(f"输出目录: {self.version_dir}")
-        print("-"*30)
-        print(f"总定义数量: {len(self.definitions)}")
-        print(f"消息定义: {len([d for d in self.definitions if d['type'] == 'message'])}")
-        print(f"枚举定义: {len(self.enum_definitions)}")
+        print(f"总定义: {len(self.definitions)}")
         print(f"有CmdId消息: {len(self.cmd_messages)}")
-        print(f"数据结构消息: {len(self.data_messages)}")
-        print("-"*30)
+        print(f"数据结构: {len(self.data_messages)}")
+        print(f"枚举: {len(self.enum_definitions)}")
         
         if self.cmd_messages:
             cmd_ids = [int(d['cmd_id']) for d in self.cmd_messages]
             print(f"CmdId范围: {min(cmd_ids)} - {max(cmd_ids)}")
         
-        print(f"文件生成: {len(self.definitions)} 个proto文件")
-        print(f"CSV报告: {self.csv_file}")
-        print("="*50)
+        print("="*40)
 
 
 def create_default_config() -> None:

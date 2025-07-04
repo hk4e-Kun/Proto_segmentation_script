@@ -12,7 +12,7 @@
   "csv_format": {
     "header": true,
     "delimiter": ",",
-    "fields": ["message_name", "cmd_id", "message_type", "description"]
+    "fields": ["message_name", "cmd_id"]
   },
   "parsing": {
     "preserve_comments": true,
