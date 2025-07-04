@@ -1,40 +1,12 @@
 {
-  "input_proto_file": "all-in-one.proto",
-  "version": "v5.0.0",
-  "output_directory": "output",
-  "protocol_subdirectory": "protocol",
-  "csv_filename": "protocol.csv",
-  "proto_file_extension": ".proto",
-  "encoding": {
-    "input": ["utf-8", "gbk", "latin-1"],
-    "output": "utf-8"
-  },
-  "csv_format": {
-    "header": true,
-    "delimiter": ",",
-    "fields": ["message_name", "cmd_id"]
-  },
-  "parsing": {
-    "preserve_comments": true,
-    "include_syntax": true,
-    "include_package": true,
-    "include_imports": true,
-    "cmd_id_patterns": [
-      "//\\s*CmdId:\\s*(\\d+)",
-      "//\\s*(\\d+)",
-      "//\\s*cmd:\\s*(\\d+)",
-      "//\\s*CMD_ID:\\s*(\\d+)"
-    ],
-    "message_name_pattern": "message\\s+(\\w+)\\s*\\{",
-    "enum_name_pattern": "enum\\s+(\\w+)\\s*\\{",
-    "request_suffixes": ["Req", "Request"],
-    "response_suffixes": ["Rsp", "Response", "Resp"],
-    "notify_suffixes": ["Notify", "Ntf"],
-    "data_suffixes": ["Data", "Info", "Config"]
-  },
-  "output": {
-    "create_empty_files": false,
-    "overwrite_existing": true,
-    "log_level": "INFO"
-  }
+  "target_files": [
+    "example.txt",
+    "source_code.h",
+    "原始"
+  ],
+  "rules_file": "nt.txt",
+  "backup_files": true,
+  "case_sensitive": true,
+  "output_suffix": "_修改版本.proto",
+  "output_extension": null
 }

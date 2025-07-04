@@ -1,568 +1,553 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+文件内容替换脚本
+根据配置文件中的规则替换指定文件中的内容
+"""
 
+import json
 import os
 import re
-import csv
-import json
+from typing import Dict, List, Tuple
 import argparse
 import logging
-from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any, Set
 
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class GenshinProtoSplitter:
+class FileReplacer:
     def __init__(self, config_file: str = "config.json"):
-        self.config = self._load_config(config_file)
-        self.input_file = self.config.get("input_proto_file", "")
+        """
+        初始化文件替换器
         
-        self.output_dir = self.config["output_directory"]
-        self.version = self.config["version"]
-        self.version_dir = Path(self.output_dir) / self.version
-        self.protocol_dir = self.version_dir / self.config["protocol_subdirectory"]
-        self.csv_file = self.version_dir / self.config["csv_filename"]
+        Args:
+            config_file: 配置文件路径
+        """
+        self.config_file = config_file
+        self.config = self.load_config()
+    
+    def load_config(self) -> Dict:
+        """
+        加载配置文件
         
-        self.definitions: List[Dict] = []
-        self.imports: List[str] = []
-        self.package_name: str = ""
-        self.syntax: str = ""
-        
-        self.all_type_names: Set[str] = set()
-        self.type_dependencies: Dict[str, Set[str]] = {}
-        
-        self.cmd_messages: List[Dict] = []
-        self.data_messages: List[Dict] = []
-        self.enum_definitions: List[Dict] = []
-        
-        self._setup_logging()
-        
-    def _load_config(self, config_file: str) -> Dict[str, Any]:
+        Returns:
+            配置字典
+        """
         try:
-            with open(config_file, 'r', encoding='utf-8') as f:
+            if not os.path.exists(self.config_file):
+                # 创建默认配置文件
+                default_config = {
+                    "target_files": [
+                        "example.txt"
+                    ],
+                    "rules_file": "rules.txt",
+                    "backup_files": True,
+                    "case_sensitive": True,
+                    "output_suffix": "_replaced",
+                    "output_extension": None
+                }
+                self.save_config(default_config)
+                logger.info(f"创建默认配置文件: {self.config_file}")
+                return default_config
+            
+            with open(self.config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            print(f"配置加载完成")
-            return config
-        except FileNotFoundError:
-            print(f"配置文件不存在，使用默认配置")
-            return self._get_default_config()
-        except json.JSONDecodeError as e:
-            print(f"配置文件格式错误，使用默认配置")
-            return self._get_default_config()
-    
-    def _get_default_config(self) -> Dict[str, Any]:
-        return {
-            "input_proto_file": "all-in-one.proto",
-            "version": "v5.0.0",
-            "output_directory": "output",
-            "protocol_subdirectory": "protocol",
-            "csv_filename": "protocol.csv",
-            "proto_file_extension": ".proto",
-            "encoding": {
-                "input": ["utf-8", "gbk", "latin-1"],
-                "output": "utf-8"
-            },
-            "csv_format": {
-                "header": True,
-                "delimiter": ",",
-                "fields": ["message_name", "cmd_id"]
-            },
-            "parsing": {
-                "preserve_comments": True,
-                "include_syntax": True,
-                "include_package": True,
-                "include_imports": True,
-                "cmd_id_patterns": [
-                    r"//\s*CmdId:\s*(\d+)",
-                    r"//\s*(\d+)",
-                    r"//\s*cmd:\s*(\d+)",
-                    r"//\s*CMD_ID:\s*(\d+)"
-                ],
-                "message_name_pattern": r"message\s+(\w+)\s*\{",
-                "enum_name_pattern": r"enum\s+(\w+)\s*\{",
-                "request_suffixes": ["Req", "Request"],
-                "response_suffixes": ["Rsp", "Response", "Resp"],
-                "notify_suffixes": ["Notify", "Ntf"],
-                "data_suffixes": ["Data", "Info", "Config"]
-            },
-            "output": {
-                "create_empty_files": False,
-                "overwrite_existing": True,
-                "log_level": "INFO"
-            }
-        }
-    
-    def _setup_logging(self):
-        log_level = getattr(logging, self.config["output"]["log_level"], logging.INFO)
-        logging.basicConfig(
-            level=log_level,
-            format='%(message)s'
-        )
-        self.logger = logging.getLogger(__name__)
-    
-    def _read_file_with_encoding(self, filepath: str) -> str:
-        encodings = self.config["encoding"]["input"]
-        
-        for encoding in encodings:
-            try:
-                with open(filepath, 'r', encoding=encoding) as f:
-                    content = f.read()
-                return content
-            except (UnicodeDecodeError, UnicodeError):
-                continue
-        
-        raise ValueError(f"无法使用任何编码读取文件: {filepath}")
-    
-    def parse_proto_file(self) -> None:
-        content = self._read_file_with_encoding(self.input_file)
-        
-        if self.config["parsing"]["include_syntax"]:
-            syntax_match = re.search(r'^syntax\s*=\s*"([^"]+)";', content, re.MULTILINE)
-            if syntax_match:
-                self.syntax = f'syntax = "{syntax_match.group(1)}";'
-        
-        if self.config["parsing"]["include_package"]:
-            package_match = re.search(r'^package\s+([^;]+);', content, re.MULTILINE)
-            if package_match:
-                self.package_name = package_match.group(1).strip()
-        
-        if self.config["parsing"]["include_imports"]:
-            import_matches = re.findall(r'^import\s+"([^"]+)";', content, re.MULTILINE)
-            self.imports = [f'import "{imp}";' for imp in import_matches]
-        
-        self._parse_definitions(content)
-        self._classify_definitions()
-        self._analyze_dependencies()
-        
-        messages_count = len([d for d in self.definitions if d['type'] == 'message'])
-        enums_count = len([d for d in self.definitions if d['type'] == 'enum'])
-        cmd_count = len(self.cmd_messages)
-        
-        print(f"解析完成: {messages_count} 个message, {enums_count} 个enum, {cmd_count} 个有CmdId")
-    
-    def _parse_definitions(self, content: str) -> None:
-        content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-        lines = content.split('\n')
-        
-        i = 0
-        current_cmd_id = None
-        current_comments = []
-        
-        while i < len(lines):
-            line = lines[i].strip()
-            
-            if line.startswith('//'):
-                current_comments.append(line)
-                cmd_id = self._extract_cmd_id(line)
-                if cmd_id:
-                    current_cmd_id = cmd_id
-                i += 1
-                continue
-            
-            message_pattern = self.config["parsing"]["message_name_pattern"]
-            message_match = re.search(message_pattern, line)
-            if message_match:
-                definition = self._parse_single_definition(lines, i, 'message', current_cmd_id, current_comments)
-                if definition:
-                    self.definitions.append(definition)
-                    self.all_type_names.add(definition['name'])
-                    i = definition['end_line']
-                    current_cmd_id = None
-                    current_comments = []
-                    continue
-            
-            enum_pattern = self.config["parsing"]["enum_name_pattern"]
-            enum_match = re.search(enum_pattern, line)
-            if enum_match:
-                definition = self._parse_single_definition(lines, i, 'enum', current_cmd_id, current_comments)
-                if definition:
-                    self.definitions.append(definition)
-                    self.all_type_names.add(definition['name'])
-                    i = definition['end_line']
-                    current_cmd_id = None
-                    current_comments = []
-                    continue
-            
-            if line and not line.startswith('//'):
-                if not any(pattern in line for pattern in ['message', 'enum', 'import', 'syntax', 'package']):
-                    current_comments = []
-            
-            i += 1
-    
-    def _extract_cmd_id(self, comment_line: str) -> Optional[str]:
-        cmd_patterns = self.config["parsing"]["cmd_id_patterns"]
-        
-        for pattern in cmd_patterns:
-            match = re.search(pattern, comment_line, re.IGNORECASE)
-            if match:
-                return match.group(1)
-        
-        return None
-    
-    def _parse_single_definition(self, lines: List[str], start_line: int, def_type: str, 
-                                cmd_id: Optional[str], comments: List[str]) -> Optional[Dict]:
-        line = lines[start_line].strip()
-        
-        if def_type == 'message':
-            pattern = self.config["parsing"]["message_name_pattern"]
-        else:
-            pattern = self.config["parsing"]["enum_name_pattern"]
-        
-        match = re.search(pattern, line)
-        if not match:
-            return None
-        
-        name = match.group(1)
-        body, end_line = self._parse_definition_body(lines, start_line)
-        full_definition = f"{def_type} {name} {{\n{body}\n}}"
-        message_type = self._identify_message_type(name, def_type)
-        description = self._extract_description(comments)
-        
-        return {
-            'name': name,
-            'type': def_type,
-            'cmd_id': cmd_id,
-            'body': body,
-            'full_definition': full_definition,
-            'comments': comments,
-            'line_number': start_line + 1,
-            'end_line': end_line,
-            'message_type': message_type,
-            'description': description
-        }
-    
-    def _identify_message_type(self, name: str, def_type: str) -> str:
-        if def_type == 'enum':
-            return 'enum'
-        
-        parsing_config = self.config["parsing"]
-        
-        for suffix in parsing_config["request_suffixes"]:
-            if name.endswith(suffix):
-                return 'request'
-        
-        for suffix in parsing_config["response_suffixes"]:
-            if name.endswith(suffix):
-                return 'response'
-        
-        for suffix in parsing_config["notify_suffixes"]:
-            if name.endswith(suffix):
-                return 'notify'
-        
-        for suffix in parsing_config["data_suffixes"]:
-            if name.endswith(suffix):
-                return 'data'
-        
-        return 'unknown'
-    
-    def _extract_description(self, comments: List[str]) -> str:
-        if not comments:
-            return ""
-        
-        descriptions = []
-        for comment in comments:
-            clean_comment = re.sub(r'^//\s*', '', comment)
-            clean_comment = re.sub(r'CmdId:\s*\d+', '', clean_comment, flags=re.IGNORECASE)
-            clean_comment = re.sub(r'^\d+\s*$', '', clean_comment)
-            clean_comment = clean_comment.strip()
-            
-            if clean_comment and clean_comment not in descriptions:
-                descriptions.append(clean_comment)
-        
-        return ' | '.join(descriptions)
-    
-    def _classify_definitions(self) -> None:
-        for definition in self.definitions:
-            if definition['type'] == 'enum':
-                self.enum_definitions.append(definition)
-            elif definition['cmd_id']:
-                self.cmd_messages.append(definition)
-            else:
-                self.data_messages.append(definition)
-    
-    def _parse_definition_body(self, lines: List[str], start_line: int) -> Tuple[str, int]:
-        brace_count = 0
-        body_lines = []
-        i = start_line
-        
-        while i < len(lines):
-            line = lines[i]
-            if '{' in line:
-                brace_count += line.count('{')
-                brace_count -= line.count('}')
+                logger.info(f"加载配置文件: {self.config_file}")
+                return config
                 
-                brace_pos = line.find('{')
-                if brace_pos < len(line) - 1:
-                    body_content = line[brace_pos + 1:].rstrip()
-                    if body_content:
-                        body_lines.append(body_content)
-                break
-            i += 1
-        
-        i += 1
-        
-        while i < len(lines) and brace_count > 0:
-            line = lines[i]
-            brace_count += line.count('{')
-            brace_count -= line.count('}')
-            
-            if brace_count > 0:
-                body_lines.append(line.rstrip())
-            elif brace_count == 0:
-                closing_brace_pos = line.rfind('}')
-                if closing_brace_pos > 0:
-                    body_content = line[:closing_brace_pos].rstrip()
-                    if body_content:
-                        body_lines.append(body_content)
-                break
-            
-            i += 1
-        
-        body = '\n'.join(body_lines).strip()
-        return body, i
-    
-    def _analyze_dependencies(self) -> None:
-        for definition in self.definitions:
-            deps = set()
-            body = definition['body']
-            
-            # 更全面的类型模式匹配，包括map类型
-            type_patterns = [
-                r'(\w+)\s+\w+\s*=',  # 基本字段类型
-                r'repeated\s+(\w+)\s+\w+\s*=',  # repeated字段
-                r'optional\s+(\w+)\s+\w+\s*=',  # optional字段
-                r'required\s+(\w+)\s+\w+\s*=',  # required字段
-                r'map<\s*\w+\s*,\s*(\w+)\s*>\s+\w+\s*=',  # map值类型
-                r'map<\s*(\w+)\s*,\s*\w+\s*>\s+\w+\s*=',  # map键类型
-                r'map<\s*(\w+)\s*,\s*(\w+)\s*>\s+\w+\s*=',  # map键值类型
-            ]
-            
-            for pattern in type_patterns:
-                matches = re.findall(pattern, body)
-                for match in matches:
-                    if isinstance(match, tuple):
-                        # 处理map<K,V>的情况，match是元组
-                        for type_name in match:
-                            if type_name in self.all_type_names:
-                                deps.add(type_name)
-                    else:
-                        # 处理单个类型的情况
-                        if match in self.all_type_names:
-                            deps.add(match)
-            
-            self.type_dependencies[definition['name']] = deps
-    
-    def _get_definition_imports(self, definition_name: str) -> List[str]:
-        imports = []
-        deps = self.type_dependencies.get(definition_name, set())
-        
-        for dep in deps:
-            import_statement = f'import "{dep}.proto";'
-            imports.append(import_statement)
-        
-        return sorted(imports)
-    
-    def create_output_structure(self) -> None:
-        self.version_dir.mkdir(parents=True, exist_ok=True)
-        self.protocol_dir.mkdir(parents=True, exist_ok=True)
-        print(f"输出目录: {self.version_dir}")
-    
-    def generate_proto_files(self) -> None:
-        extension = self.config["proto_file_extension"]
-        output_encoding = self.config["encoding"]["output"]
-        overwrite = self.config["output"]["overwrite_existing"]
-        
-        for definition in self.definitions:
-            filename = f"{definition['name']}{extension}"
-            filepath = self.protocol_dir / filename
-            
-            if filepath.exists() and not overwrite:
-                continue
-            
-            content_parts = []
-            
-            if definition['cmd_id']:
-                content_parts.append(f"// {definition['name']} - CmdId: {definition['cmd_id']}")
-            else:
-                content_parts.append(f"// {definition['name']} - {definition['message_type']}")
-            
-            if definition['description']:
-                content_parts.append(f"// {definition['description']}")
-            
-            content_parts.append("")
-            
-            if self.syntax:
-                content_parts.append(self.syntax)
-                content_parts.append("")
-            
-            if self.package_name:
-                content_parts.append(f"package {self.package_name};")
-                content_parts.append("")
-            
-            specific_imports = self._get_definition_imports(definition['name'])
-            if specific_imports:
-                content_parts.extend(specific_imports)
-                content_parts.append("")
-            
-            if self.imports:
-                for imp in self.imports:
-                    if imp not in specific_imports:
-                        content_parts.append(imp)
-                if any(imp not in specific_imports for imp in self.imports):
-                    content_parts.append("")
-            
-            if definition['comments'] and self.config["parsing"]["preserve_comments"]:
-                content_parts.extend(definition['comments'])
-            
-            content_parts.append(definition['full_definition'])
-            
-            with open(filepath, 'w', encoding=output_encoding) as f:
-                f.write('\n'.join(content_parts))
-        
-        print(f"生成 {len(self.definitions)} 个proto文件")
-    
-    def generate_csv_report(self) -> None:
-        csv_config = self.config["csv_format"]
-        output_encoding = self.config["encoding"]["output"]
-        
-        with open(self.csv_file, 'w', newline='', encoding=output_encoding) as f:
-            writer = csv.writer(f, delimiter=csv_config["delimiter"])
-            
-            # 写入表头（如果配置要求）
-            if csv_config["header"]:
-                writer.writerow(csv_config["fields"])
-            
-            # 只写入有CmdId的消息，按CmdId排序
-            cmd_definitions = [d for d in self.definitions if d['cmd_id']]
-            cmd_definitions.sort(key=lambda x: int(x['cmd_id']))
-            
-            for definition in cmd_definitions:
-                row = []
-                for field in csv_config["fields"]:
-                    if field == "message_name":
-                        row.append(definition['name'])
-                    elif field == "cmd_id":
-                        row.append(definition['cmd_id'])
-                    else:
-                        row.append(definition.get(field, ''))
-                writer.writerow(row)
-        
-        print(f"生成CSV: {self.csv_file} (包含 {len(cmd_definitions)} 个有CmdId的消息)")
-    
-    def run(self) -> None:
-        try:
-            print("开始处理原神Proto文件")
-            print(f"输入文件: {self.input_file}")
-            print(f"版本: {self.version}")
-            
-            if not os.path.exists(self.input_file):
-                raise FileNotFoundError(f"输入文件不存在: {self.input_file}")
-            
-            print("解析proto文件...")
-            self.parse_proto_file()
-            
-            print("创建输出目录...")
-            self.create_output_structure()
-            
-            print("生成proto文件...")
-            self.generate_proto_files()
-            
-            print("生成CSV报告...")
-            self.generate_csv_report()
-            
-            print("处理完成！")
-            
-            self._print_final_statistics()
-            
         except Exception as e:
-            print(f"处理过程中发生错误: {e}")
+            logger.error(f"加载配置文件失败: {e}")
             raise
     
-    def _print_final_statistics(self) -> None:
-        print("\n" + "="*40)
-        print("统计信息")
-        print("="*40)
-        print(f"版本: {self.version}")
-        print(f"输出目录: {self.version_dir}")
-        print(f"总定义: {len(self.definitions)}")
-        print(f"有CmdId消息: {len(self.cmd_messages)}")
-        print(f"数据结构: {len(self.data_messages)}")
-        print(f"枚举: {len(self.enum_definitions)}")
+    def save_config(self, config: Dict):
+        """
+        保存配置文件
         
-        if self.cmd_messages:
-            cmd_ids = [int(d['cmd_id']) for d in self.cmd_messages]
-            print(f"CmdId范围: {min(cmd_ids)} - {max(cmd_ids)}")
+        Args:
+            config: 配置字典
+        """
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+                logger.info(f"保存配置文件: {self.config_file}")
+        except Exception as e:
+            logger.error(f"保存配置文件失败: {e}")
+            raise
+    
+    def generate_output_filename(self, input_file: str) -> str:
+        """
+        根据配置生成输出文件名
         
-        print("="*40)
-
-
-def create_default_config() -> None:
-    splitter = GenshinProtoSplitter()
-    config = splitter._get_default_config()
+        Args:
+            input_file: 输入文件路径
+            
+        Returns:
+            输出文件路径
+        """
+        base_name = os.path.splitext(input_file)[0]
+        original_ext = os.path.splitext(input_file)[1]
+        
+        suffix = self.config.get("output_suffix", "_replaced")
+        new_ext = self.config.get("output_extension", original_ext)
+        
+        # 如果没有指定新扩展名，使用原扩展名
+        if new_ext is None:
+            new_ext = original_ext
+        elif not new_ext.startswith('.'):
+            new_ext = '.' + new_ext
+        
+        return f"{base_name}{suffix}{new_ext}"
     
-    with open("config.json", 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    def parse_replacement_rules(self) -> List[Tuple[str, str]]:
+        """
+        从配置文件指定的规则文件中解析替换规则
+        
+        Returns:
+            [(原字符串, 替换字符串), ...]
+        """
+        rules = []
+        rules_file = self.config.get("rules_file", "")
+        
+        if not rules_file:
+            logger.warning("配置文件中未指定rules_file")
+            return rules
+        
+        if not os.path.exists(rules_file):
+            logger.warning(f"规则文件不存在: {rules_file}")
+            return rules
+        
+        try:
+            with open(rules_file, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        # 跳过空行和注释行
+                        continue
+                    
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        old_str = parts[0]
+                        new_str = " ".join(parts[1:])
+                        rules.append((old_str, new_str))
+                    else:
+                        logger.warning(f"跳过无效规则 (第{line_num}行): {line}")
+            
+            logger.info(f"从 {rules_file} 解析到 {len(rules)} 条替换规则")
+            
+        except Exception as e:
+            logger.error(f"读取规则文件 {rules_file} 时出错: {e}")
+        
+        return rules
     
-    print("已创建默认配置文件: config.json")
-
+    def backup_file(self, file_path: str) -> str:
+        """
+        备份文件
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            备份文件路径
+        """
+        backup_path = f"{file_path}.backup"
+        try:
+            with open(file_path, 'r', encoding='utf-8') as src, \
+                 open(backup_path, 'w', encoding='utf-8') as dst:
+                dst.write(src.read())
+            logger.info(f"备份文件: {file_path} -> {backup_path}")
+            return backup_path
+        except Exception as e:
+            logger.error(f"备份文件失败: {e}")
+            raise
+    
+    def find_enum_blocks(self, content: str) -> List[Tuple[int, int]]:
+        """
+        找到所有枚举块的位置
+        
+        Args:
+            content: 文件内容
+            
+        Returns:
+            [(start_pos, end_pos), ...] 枚举块在内容中的位置
+        """
+        enum_blocks = []
+        # 匹配 enum 关键字后跟可选的标识符，然后是花括号
+        enum_pattern = r'enum\s+[^{]*\{'
+        
+        for match in re.finditer(enum_pattern, content, re.IGNORECASE):
+            start_pos = match.start()
+            # 从 enum 开始找到对应的结束花括号
+            brace_count = 0
+            pos = match.end() - 1  # 从第一个 { 开始
+            
+            while pos < len(content):
+                if content[pos] == '{':
+                    brace_count += 1
+                elif content[pos] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_pos = pos + 1
+                        enum_blocks.append((start_pos, end_pos))
+                        break
+                pos += 1
+        
+        return enum_blocks
+    
+    def is_position_in_enum(self, position: int, enum_blocks: List[Tuple[int, int]]) -> bool:
+        """
+        检查位置是否在枚举块内
+        
+        Args:
+            position: 要检查的位置
+            enum_blocks: 枚举块列表
+            
+        Returns:
+            是否在枚举块内
+        """
+        for start, end in enum_blocks:
+            if start <= position < end:
+                return True
+        return False
+    
+    def safe_replace_content(self, content: str, old_str: str, new_str: str, case_sensitive: bool = True) -> Tuple[str, int]:
+        """
+        安全地替换内容，避免在枚举块内进行替换
+        
+        Args:
+            content: 原始内容
+            old_str: 要替换的字符串
+            new_str: 替换后的字符串
+            case_sensitive: 是否区分大小写
+            
+        Returns:
+            (替换后的内容, 替换次数)
+        """
+        # 找到所有枚举块
+        enum_blocks = self.find_enum_blocks(content)
+        
+        if not enum_blocks:
+            # 没有枚举块，直接替换
+            if case_sensitive:
+                if old_str in content:
+                    return content.replace(old_str, new_str), content.count(old_str)
+                else:
+                    return content, 0
+            else:
+                pattern = re.compile(re.escape(old_str), re.IGNORECASE)
+                matches = pattern.findall(content)
+                if matches:
+                    return pattern.sub(new_str, content), len(matches)
+                else:
+                    return content, 0
+        
+        # 有枚举块，需要避免在枚举块内替换
+        new_content = content
+        total_replacements = 0
+        
+        if case_sensitive:
+            # 区分大小写替换
+            start_pos = 0
+            while True:
+                pos = new_content.find(old_str, start_pos)
+                if pos == -1:
+                    break
+                
+                # 检查是否在枚举块内
+                if not self.is_position_in_enum(pos, enum_blocks):
+                    # 不在枚举块内，可以替换
+                    new_content = new_content[:pos] + new_str + new_content[pos + len(old_str):]
+                    total_replacements += 1
+                    # 调整枚举块位置（因为内容长度可能改变）
+                    len_diff = len(new_str) - len(old_str)
+                    if len_diff != 0:
+                        enum_blocks = [(start + (len_diff if start > pos else 0), 
+                                       end + (len_diff if end > pos else 0)) 
+                                      for start, end in enum_blocks]
+                    start_pos = pos + len(new_str)
+                else:
+                    # 在枚举块内，跳过
+                    start_pos = pos + len(old_str)
+        else:
+            # 不区分大小写替换
+            pattern = re.compile(re.escape(old_str), re.IGNORECASE)
+            start_pos = 0
+            
+            while True:
+                match = pattern.search(new_content, start_pos)
+                if not match:
+                    break
+                
+                pos = match.start()
+                
+                # 检查是否在枚举块内
+                if not self.is_position_in_enum(pos, enum_blocks):
+                    # 不在枚举块内，可以替换
+                    new_content = new_content[:pos] + new_str + new_content[match.end():]
+                    total_replacements += 1
+                    # 调整枚举块位置
+                    len_diff = len(new_str) - len(match.group())
+                    if len_diff != 0:
+                        enum_blocks = [(start + (len_diff if start > pos else 0), 
+                                       end + (len_diff if end > pos else 0)) 
+                                      for start, end in enum_blocks]
+                    start_pos = pos + len(new_str)
+                else:
+                    # 在枚举块内，跳过
+                    start_pos = match.end()
+        
+        return new_content, total_replacements
+    
+    def replace_in_file(self, file_path: str, rules: List[Tuple[str, str]]) -> Dict:
+        """
+        在文件中执行替换并生成新文件
+        
+        Args:
+            file_path: 文件路径
+            rules: 替换规则列表
+            
+        Returns:
+            替换统计信息
+        """
+        if not os.path.exists(file_path):
+            logger.warning(f"文件不存在: {file_path}")
+            return {"success": False, "error": "文件不存在"}
+        
+        try:
+            # 生成输出文件名
+            output_file = self.generate_output_filename(file_path)
+            
+            # 备份原文件（如果需要）
+            if self.config.get("backup_files", True):
+                self.backup_file(file_path)
+            
+            # 读取文件内容
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            original_content = content
+            total_replacement_count = 0
+            replaced_rules = []
+            
+            # 执行替换
+            for old_str, new_str in rules:
+                content, count = self.safe_replace_content(
+                    content, old_str, new_str, 
+                    self.config.get("case_sensitive", True)
+                )
+                
+                if count > 0:
+                    total_replacement_count += count
+                    replaced_rules.append((old_str, new_str, count))
+                    logger.info(f"替换 '{old_str}' -> '{new_str}' ({count} 次)")
+                else:
+                    logger.debug(f"未找到字段: {old_str}")
+            
+            # 写入新文件
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            if total_replacement_count > 0:
+                logger.info(f"处理完成：{file_path} -> {output_file}，共替换 {total_replacement_count} 处")
+            else:
+                logger.info(f"处理完成：{file_path} -> {output_file}，未发现需要替换的内容")
+            
+            return {
+                "success": True,
+                "input_file": file_path,
+                "output_file": output_file,
+                "total_replacements": total_replacement_count,
+                "replaced_rules": replaced_rules
+            }
+            
+        except Exception as e:
+            logger.error(f"处理文件 {file_path} 时出错: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def run(self, target_files: List[str] = None) -> Dict:
+        """
+        运行替换任务
+        
+        Args:
+            target_files: 目标文件列表，如果为None则使用配置文件中的设置
+            
+        Returns:
+            执行结果统计
+        """
+        if target_files is None:
+            target_files = self.config.get("target_files", [])
+        
+        rules = self.parse_replacement_rules()
+        if not rules:
+            logger.warning("没有找到替换规则")
+            return {"success": False, "error": "没有替换规则"}
+        
+        results = []
+        total_replacements = 0
+        
+        for file_path in target_files:
+            result = self.replace_in_file(file_path, rules)
+            results.append(result)
+            if result.get("success"):
+                total_replacements += result.get("total_replacements", 0)
+        
+        logger.info(f"替换任务完成，总计替换 {total_replacements} 处")
+        
+        return {
+            "success": True,
+            "total_files": len(target_files),
+            "total_replacements": total_replacements,
+            "results": results
+        }
+    
+    def add_replacement_rule(self, old_str: str, new_str: str):
+        """
+        添加替换规则到规则文件
+        
+        Args:
+            old_str: 要替换的字符串
+            new_str: 替换后的字符串
+        """
+        rules_file = self.config.get("rules_file", "rules.txt")
+        rule_line = f"{old_str} {new_str}\n"
+        
+        try:
+            # 检查规则是否已存在
+            existing_rules = []
+            if os.path.exists(rules_file):
+                with open(rules_file, 'r', encoding='utf-8') as f:
+                    existing_rules = f.readlines()
+            
+            # 检查是否已存在相同的规则
+            for line in existing_rules:
+                if line.strip() and line.strip().split()[0] == old_str:
+                    logger.info(f"规则已存在: {old_str} -> {new_str}")
+                    return
+            
+            # 添加新规则
+            with open(rules_file, 'a', encoding='utf-8') as f:
+                f.write(rule_line)
+            
+            logger.info(f"添加替换规则到 {rules_file}: {old_str} -> {new_str}")
+            
+        except Exception as e:
+            logger.error(f"添加规则失败: {e}")
+    
+    def remove_replacement_rule(self, old_str: str):
+        """
+        从规则文件中移除替换规则
+        
+        Args:
+            old_str: 要移除的原字符串
+        """
+        rules_file = self.config.get("rules_file", "rules.txt")
+        
+        if not os.path.exists(rules_file):
+            logger.warning(f"规则文件不存在: {rules_file}")
+            return
+        
+        try:
+            with open(rules_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            updated_lines = []
+            removed = False
+            
+            for line in lines:
+                if line.strip() and not line.strip().startswith('#'):
+                    if line.strip().split()[0] == old_str:
+                        removed = True
+                        logger.info(f"移除规则: {line.strip()}")
+                        continue
+                updated_lines.append(line)
+            
+            if removed:
+                with open(rules_file, 'w', encoding='utf-8') as f:
+                    f.writelines(updated_lines)
+                logger.info(f"规则文件已更新: {rules_file}")
+            else:
+                logger.info(f"未找到规则: {old_str}")
+                
+        except Exception as e:
+            logger.error(f"移除规则失败: {e}")
+    
+    def create_sample_rules_file(self):
+        """
+        创建示例规则文件
+        """
+        rules_file = self.config.get("rules_file", "rules.txt")
+        
+        if os.path.exists(rules_file):
+            logger.info(f"规则文件已存在: {rules_file}")
+            return
+        
+        sample_rules = [
+            "# 这是规则文件示例",
+            "# 格式: 原字符串 替换字符串",
+            "# 以#开头的行是注释",
+            "# 注意: 在enum花括号内的内容不会被替换",
+            "",
+            "FAABCMJGOEO GetPlayerTokenRsp",
+            "AELCGAFNHGN GetPlayerTokenReq", 
+            "FIDPEPOEIDD PlayerLoginReq",
+            "EJMEHGBCHOG account_uid",
+            "OHKGLEKNNBJ token",
+            "FBGOPGBEJFC country_code",
+            "EJNFKLDKGGH SocialDetail"
+        ]
+        
+        try:
+            with open(rules_file, 'w', encoding='utf-8') as f:
+                for rule in sample_rules:
+                    f.write(rule + '\n')
+            logger.info(f"创建示例规则文件: {rules_file}")
+        except Exception as e:
+            logger.error(f"创建规则文件失败: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="原神Proto文件分割工具")
-    
-    parser.add_argument("-c", "--config", default="config.json", help="配置文件路径")
-    parser.add_argument("-i", "--input", help="输入proto文件路径")
-    parser.add_argument("-o", "--output", help="输出目录路径")
-    parser.add_argument("-v", "--version", help="版本标识")
-    parser.add_argument("--create-config", action="store_true", help="创建默认配置文件")
-    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], 
-                       default="INFO", help="日志级别")
+    """
+    主函数，支持命令行参数
+    """
+    parser = argparse.ArgumentParser(description="文件内容替换工具")
+    parser.add_argument("--config", "-c", default="config.json", help="配置文件路径")
+    parser.add_argument("--files", "-f", nargs="*", help="目标文件列表")
+    parser.add_argument("--add-rule", "-a", nargs=2, metavar=("OLD", "NEW"), help="添加替换规则")
+    parser.add_argument("--remove-rule", "-r", help="移除替换规则")
+    parser.add_argument("--list-rules", "-l", action="store_true", help="列出所有规则")
+    parser.add_argument("--create-sample", "-s", action="store_true", help="创建示例规则文件")
     
     args = parser.parse_args()
     
-    if args.create_config:
-        create_default_config()
-        return
-    
     try:
-        splitter = GenshinProtoSplitter(args.config)
+        replacer = FileReplacer(args.config)
         
-        if args.input:
-            splitter.input_file = args.input
-            splitter.config["input_proto_file"] = args.input
-        
-        if args.output:
-            splitter.config["output_directory"] = args.output
-            splitter.output_dir = args.output
-            splitter.version_dir = Path(args.output) / splitter.version
-            splitter.protocol_dir = splitter.version_dir / splitter.config["protocol_subdirectory"]
-            splitter.csv_file = splitter.version_dir / splitter.config["csv_filename"]
-        
-        if args.version:
-            splitter.config["version"] = args.version
-            splitter.version = args.version
-            splitter.version_dir = Path(splitter.output_dir) / args.version
-            splitter.protocol_dir = splitter.version_dir / splitter.config["protocol_subdirectory"]
-            splitter.csv_file = splitter.version_dir / splitter.config["csv_filename"]
-        
-        if args.log_level:
-            splitter.config["output"]["log_level"] = args.log_level
-            splitter._setup_logging()
-        
-        if not splitter.input_file:
-            print("错误: 未指定输入文件")
-            return 1
-        
-        splitter.run()
-        return 0
-        
-    except KeyboardInterrupt:
-        print("\n用户中断操作")
-        return 1
+        if args.add_rule:
+            replacer.add_replacement_rule(args.add_rule[0], args.add_rule[1])
+        elif args.remove_rule:
+            replacer.remove_replacement_rule(args.remove_rule)
+        elif args.list_rules:
+            rules = replacer.parse_replacement_rules()
+            print("当前替换规则:")
+            for i, (old, new) in enumerate(rules, 1):
+                print(f"{i:2d}. {old} -> {new}")
+        elif args.create_sample:
+            replacer.create_sample_rules_file()
+        else:
+            result = replacer.run(args.files)
+            if result["success"]:
+                print(f"替换完成！共处理 {result['total_files']} 个文件，替换 {result['total_replacements']} 处")
+                print("生成的文件:")
+                for res in result["results"]:
+                    if res.get("success"):
+                        print(f"  {res['input_file']} -> {res['output_file']}")
+            else:
+                print(f"替换失败: {result.get('error', '未知错误')}")
+                
     except Exception as e:
-        print(f"错误: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"程序执行出错: {e}")
         return 1
-
+    
+    return 0
 
 if __name__ == "__main__":
     exit(main())
