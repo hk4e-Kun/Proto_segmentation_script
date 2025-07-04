@@ -11,6 +11,8 @@ import re
 from typing import Dict, List, Tuple
 import argparse
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,6 +28,7 @@ class FileReplacer:
         """
         self.config_file = config_file
         self.config = self.load_config()
+        self.lock = threading.Lock()  # 用于线程安全的日志输出
     
     def load_config(self) -> Dict:
         """
@@ -45,7 +48,8 @@ class FileReplacer:
                     "backup_files": True,
                     "case_sensitive": True,
                     "output_suffix": "_replaced",
-                    "output_extension": None
+                    "output_extension": None,
+                    "max_workers": 4
                 }
                 self.save_config(default_config)
                 logger.info(f"创建默认配置文件: {self.config_file}")
@@ -339,18 +343,21 @@ class FileReplacer:
                 if count > 0:
                     total_replacement_count += count
                     replaced_rules.append((old_str, new_str, count))
-                    logger.info(f"替换 '{old_str}' -> '{new_str}' ({count} 次)")
+                    with self.lock:
+                        logger.info(f"[{threading.current_thread().name}] 替换 '{old_str}' -> '{new_str}' ({count} 次)")
                 else:
-                    logger.debug(f"未找到字段: {old_str}")
+                    with self.lock:
+                        logger.debug(f"[{threading.current_thread().name}] 未找到字段: {old_str}")
             
             # 写入新文件
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(content)
             
-            if total_replacement_count > 0:
-                logger.info(f"处理完成：{file_path} -> {output_file}，共替换 {total_replacement_count} 处")
-            else:
-                logger.info(f"处理完成：{file_path} -> {output_file}，未发现需要替换的内容")
+            with self.lock:
+                if total_replacement_count > 0:
+                    logger.info(f"[{threading.current_thread().name}] 处理完成：{file_path} -> {output_file}，共替换 {total_replacement_count} 处")
+                else:
+                    logger.info(f"[{threading.current_thread().name}] 处理完成：{file_path} -> {output_file}，未发现需要替换的内容")
             
             return {
                 "success": True,
@@ -361,8 +368,30 @@ class FileReplacer:
             }
             
         except Exception as e:
-            logger.error(f"处理文件 {file_path} 时出错: {e}")
+            with self.lock:
+                logger.error(f"[{threading.current_thread().name}] 处理文件 {file_path} 时出错: {e}")
             return {"success": False, "error": str(e)}
+    
+    def process_file_wrapper(self, file_path: str, rules: List[Tuple[str, str]]) -> Dict:
+        """
+        文件处理包装器，用于多线程处理
+        
+        Args:
+            file_path: 文件路径
+            rules: 替换规则列表
+            
+        Returns:
+            处理结果
+        """
+        with self.lock:
+            logger.info(f"[{threading.current_thread().name}] 开始处理文件: {file_path}")
+        
+        result = self.replace_in_file(file_path, rules)
+        
+        with self.lock:
+            logger.info(f"[{threading.current_thread().name}] 完成处理文件: {file_path}")
+        
+        return result
     
     def run(self, target_files: List[str] = None) -> Dict:
         """
@@ -382,14 +411,33 @@ class FileReplacer:
             logger.warning("没有找到替换规则")
             return {"success": False, "error": "没有替换规则"}
         
+        # 获取最大工作线程数
+        max_workers = self.config.get("max_workers", 4)
+        logger.info(f"使用 {max_workers} 个线程处理 {len(target_files)} 个文件")
+        
         results = []
         total_replacements = 0
         
-        for file_path in target_files:
-            result = self.replace_in_file(file_path, rules)
-            results.append(result)
-            if result.get("success"):
-                total_replacements += result.get("total_replacements", 0)
+        # 使用线程池处理文件
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_file = {
+                executor.submit(self.process_file_wrapper, file_path, rules): file_path 
+                for file_path in target_files
+            }
+            
+            # 收集结果
+            for future in as_completed(future_to_file):
+                file_path = future_to_file[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    if result.get("success"):
+                        total_replacements += result.get("total_replacements", 0)
+                except Exception as e:
+                    with self.lock:
+                        logger.error(f"处理文件 {file_path} 时发生异常: {e}")
+                    results.append({"success": False, "error": str(e), "input_file": file_path})
         
         logger.info(f"替换任务完成，总计替换 {total_replacements} 处")
         
@@ -514,12 +562,17 @@ def main():
     parser.add_argument("--add-rule", "-a", nargs=2, metavar=("OLD", "NEW"), help="添加替换规则")
     parser.add_argument("--remove-rule", "-r", help="移除替换规则")
     parser.add_argument("--list-rules", "-l", action="store_true", help="列出所有规则")
+    parser.add_argument("--max-workers", "-w", type=int, help="最大工作线程数")
     parser.add_argument("--create-sample", "-s", action="store_true", help="创建示例规则文件")
     
     args = parser.parse_args()
     
     try:
         replacer = FileReplacer(args.config)
+        
+        # 如果指定了最大工作线程数，更新配置
+        if args.max_workers:
+            replacer.config["max_workers"] = args.max_workers
         
         if args.add_rule:
             replacer.add_replacement_rule(args.add_rule[0], args.add_rule[1])
