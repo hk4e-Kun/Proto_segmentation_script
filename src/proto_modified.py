@@ -24,12 +24,17 @@ class GenshinProtoSplitter:
         self.imports: List[str] = []
         self.package_name: str = ""
         self.syntax: str = ""
+        self.all_message_names: Set[str] = set()  # 存储所有消息名称
         
         # 预编译正则表达式
         self.message_pattern = re.compile(self.config["parsing"]["message_name_pattern"])
         self.enum_pattern = re.compile(self.config["parsing"]["enum_name_pattern"])
         self.field_pattern = re.compile(r'^\s*(?:repeated\s+|optional\s+|required\s+)?(\w+)\s+(\w+)\s*=\s*\d+;')
         self.cmd_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in self.config["parsing"]["cmd_id_patterns"]]
+        
+        # 新增：用于检测需要导入的类型的正则表达式
+        self.type_pattern = re.compile(r'^\s*(?:repeated\s+|optional\s+|required\s+)?(?:map\s*<\s*\w+\s*,\s*)?(\w+)(?:\s*>)?\s+(\w+)\s*=\s*\d+;')
+        self.map_pattern = re.compile(r'^\s*(?:repeated\s+|optional\s+|required\s+)?map\s*<\s*(\w+)\s*,\s*(\w+)\s*>\s+(\w+)\s*=\s*\d+;')
         
         # 缓存
         self.obfuscated_cache: Dict[str, bool] = {}
@@ -113,15 +118,37 @@ class GenshinProtoSplitter:
                 result_lines.append(line)
                 continue
             
-            match = self.field_pattern.match(stripped)
-            if match:
-                field_name = match.group(2)
-                if self._is_obfuscated_field(field_name):
+            # 尝试匹配map类型
+            map_match = self.map_pattern.match(stripped)
+            if map_match:
+                key_type = map_match.group(1)
+                value_type = map_match.group(2)
+                field_name = map_match.group(3)
+                
+                # 检查字段类型和名称是否混淆
+                if (self._is_obfuscated_field(key_type) or 
+                    self._is_obfuscated_field(value_type) or 
+                    self._is_obfuscated_field(field_name)):
+                    
                     result_lines.append(f"    // {stripped}  // 混淆字段")
                 else:
                     result_lines.append(line)
             else:
-                result_lines.append(line)
+                # 匹配普通字段
+                field_match = self.field_pattern.match(stripped)
+                if field_match:
+                    field_type = field_match.group(1)
+                    field_name = field_match.group(2)
+                    
+                    # 检查字段类型和名称是否混淆
+                    if (self._is_obfuscated_field(field_type) or 
+                        self._is_obfuscated_field(field_name)):
+                        
+                        result_lines.append(f"    // {stripped}  // 混淆字段")
+                    else:
+                        result_lines.append(line)
+                else:
+                    result_lines.append(line)
         
         return '\n'.join(result_lines)
     
@@ -137,6 +164,57 @@ class GenshinProtoSplitter:
                 commented_lines.append("//")
         
         return '\n'.join(commented_lines)
+    
+    def _extract_required_imports(self, body: str) -> Set[str]:
+        """提取消息体中需要导入的类型"""
+        required_types = set()
+        
+        # 基本类型，不需要导入
+        basic_types = {
+            'int32', 'int64', 'uint32', 'uint64', 'sint32', 'sint64',
+            'fixed32', 'fixed64', 'sfixed32', 'sfixed64', 'float', 'double',
+            'bool', 'string', 'bytes'
+        }
+        
+        for line in body.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('//'):
+                continue
+            
+            # 检查map类型
+            map_match = self.map_pattern.match(line)
+            if map_match:
+                key_type = map_match.group(1)
+                value_type = map_match.group(2)
+                
+                # 检查key类型
+                if (key_type not in basic_types and 
+                    key_type[0].isupper() and 
+                    key_type in self.all_message_names):
+                    required_types.add(key_type)
+                
+                # 检查value类型
+                if (value_type not in basic_types and 
+                    value_type[0].isupper() and 
+                    value_type in self.all_message_names):
+                    required_types.add(value_type)
+                continue
+            
+            # 检查普通字段类型
+            type_match = self.type_pattern.match(line)
+            if type_match:
+                field_type = type_match.group(1)
+                
+                # 判断是否需要导入：
+                # 1. 不是基本类型
+                # 2. 首字母大写（按照你的要求）
+                # 3. 在所有消息名称中存在
+                if (field_type not in basic_types and 
+                    field_type[0].isupper() and 
+                    field_type in self.all_message_names):
+                    required_types.add(field_type)
+        
+        return required_types
     
     def parse_proto_file(self) -> None:
         print("开始解析proto文件...")
@@ -159,9 +237,28 @@ class GenshinProtoSplitter:
         
         # 移除块注释
         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+        
+        # 第一次遍历：收集所有消息名称
+        self._collect_all_message_names(content)
+        
+        # 第二次遍历：解析定义
         self._parse_definitions(content)
         
         print(f"解析完成，找到 {len(self.definitions)} 个定义")
+    
+    def _collect_all_message_names(self, content: str) -> None:
+        """收集所有消息和枚举名称"""
+        # 查找所有message定义
+        message_matches = re.findall(r'^\s*message\s+(\w+)\s*\{', content, re.MULTILINE)
+        for name in message_matches:
+            self.all_message_names.add(name)
+        
+        # 查找所有enum定义
+        enum_matches = re.findall(r'^\s*enum\s+(\w+)\s*\{', content, re.MULTILINE)
+        for name in enum_matches:
+            self.all_message_names.add(name)
+        
+        print(f"收集到 {len(self.all_message_names)} 个消息/枚举名称")
     
     def _parse_definitions(self, content: str) -> None:
         lines = content.split('\n')
@@ -230,8 +327,13 @@ class GenshinProtoSplitter:
         has_obfuscated_fields = self._has_obfuscated_fields(body)
         
         # 处理混淆字段
-        if has_obfuscated_fields and not is_obfuscated_message:
+        if has_obfuscated_fields or is_obfuscated_message:
             body = self._comment_out_obfuscated_fields(body)
+        
+        # 提取需要导入的类型
+        required_imports = set()
+        if def_type == 'message':
+            required_imports = self._extract_required_imports(body)
         
         full_definition = f"{def_type} {name} {{\n{body}\n}}"
         message_type = self._identify_message_type(name, def_type)
@@ -247,7 +349,8 @@ class GenshinProtoSplitter:
             'end_line': end_line,
             'message_type': message_type,
             'is_enum': (def_type == 'enum'),
-            'is_obfuscated': is_obfuscated_message
+            'is_obfuscated': is_obfuscated_message,
+            'required_imports': required_imports
         }
     
     def _identify_message_type(self, name: str, def_type: str) -> str:
@@ -331,6 +434,9 @@ class GenshinProtoSplitter:
         skip_count = 0
         commented_count = 0
         
+        # 创建名称到定义的映射，用于快速查找
+        name_to_definition = {d['name']: d for d in self.definitions}
+        
         for definition in self.definitions:
             # 跳过混淆消息（按配置）
             if definition['is_obfuscated']:
@@ -377,10 +483,33 @@ class GenshinProtoSplitter:
                 content_parts.append(f"package {self.package_name};")
                 content_parts.append("")
             
-            # 添加imports
+            # 添加全局imports
             if self.imports:
                 content_parts.extend(self.imports)
                 content_parts.append("")
+            
+            # 添加特定的导入（增强：处理混淆字段）
+            if definition.get('required_imports'):
+                import_list = sorted(definition['required_imports'])
+                
+                for import_type in import_list:
+                    import_filename = f"{import_type}{extension}"
+                    
+                    # 检查导入的类型是否是混淆的
+                    is_obfuscated_import = False
+                    if import_type in name_to_definition:
+                        import_def = name_to_definition[import_type]
+                        is_obfuscated_import = import_def['is_obfuscated']
+                    
+                    # 根据混淆状态决定是否注释
+                    if is_obfuscated_import and self.config.get("obfuscation", {}).get("comment_obfuscated_definitions", True):
+                        content_parts.append(f'// import "{import_filename}"; // 混淆类型')
+                    else:
+                        content_parts.append(f'import "{import_filename}";')
+                
+                if import_list:
+                    content_parts.append("")
+                    print(f"为 {definition['name']} 添加导入: {', '.join(import_list)}")
             
             # 添加注释
             if definition['comments'] and self.config["parsing"]["preserve_comments"]:
