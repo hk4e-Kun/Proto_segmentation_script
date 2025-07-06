@@ -24,7 +24,7 @@ class GenshinProtoSplitter:
         self.imports: List[str] = []
         self.package_name: str = ""
         self.syntax: str = ""
-        self.all_message_names: Set[str] = set()  # 存储所有消息名称
+        self.all_message_names: Set[str] = set()
         
         # 预编译正则表达式
         self.message_pattern = re.compile(self.config["parsing"]["message_name_pattern"])
@@ -32,7 +32,7 @@ class GenshinProtoSplitter:
         self.field_pattern = re.compile(r'^\s*(?:repeated\s+|optional\s+|required\s+)?(\w+)\s+(\w+)\s*=\s*\d+;')
         self.cmd_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in self.config["parsing"]["cmd_id_patterns"]]
         
-        # 新增：用于检测需要导入的类型的正则表达式
+        # 用于检测需要导入的类型的正则表达式
         self.type_pattern = re.compile(r'^\s*(?:repeated\s+|optional\s+|required\s+)?(?:map\s*<\s*\w+\s*,\s*)?(\w+)(?:\s*>)?\s+(\w+)\s*=\s*\d+;')
         self.map_pattern = re.compile(r'^\s*(?:repeated\s+|optional\s+|required\s+)?map\s*<\s*(\w+)\s*,\s*(\w+)\s*>\s+(\w+)\s*=\s*\d+;')
         
@@ -93,8 +93,200 @@ class GenshinProtoSplitter:
         self.obfuscated_cache[name] = result
         return result
     
+    def _has_consecutive_uppercase(self, name: str) -> bool:
+        """检查是否有连续大写字母"""
+        min_consecutive = self.config.get("obfuscation", {}).get("min_consecutive_uppercase", 5)
+        consecutive_uppercase = 0
+        max_consecutive = 0
+        
+        for char in name:
+            if char.isupper():
+                consecutive_uppercase += 1
+                max_consecutive = max(max_consecutive, consecutive_uppercase)
+            else:
+                consecutive_uppercase = 0
+        
+        return max_consecutive >= min_consecutive
+    
+    def _is_inside_enum_definition(self, lines: List[str], line_index: int) -> bool:
+        """检查当前行是否在枚举定义内部"""
+        # 向上查找最近的enum定义开始
+        brace_count = 0
+        for i in range(line_index, -1, -1):
+            line = lines[i].strip()
+            if not line or line.startswith('//'):
+                continue
+            
+            # 计算大括号
+            brace_count += line.count('}') - line.count('{')
+            
+            # 如果找到enum定义行
+            if re.match(r'^\s*enum\s+\w+\s*\{', line):
+                return brace_count <= 0
+            
+            # 如果找到message定义行，说明不在enum内
+            if re.match(r'^\s*message\s+\w+\s*\{', line):
+                return False
+        
+        return False
+    
+    def _process_generated_proto_content(self, content: str) -> str:
+        """
+        对生成的 proto 文件内容进行最终处理，注释掉所有混淆字段
+        修改：枚举定义内部的内容不会被注释
+        """
+        lines = content.split('\n')
+        result_lines = []
+        
+        for i, line in enumerate(lines):
+            original_line = line
+            stripped = line.strip()
+            
+            # 跳过空行和已经注释的行
+            if not stripped or stripped.startswith('//'):
+                result_lines.append(line)
+                continue
+            
+            # 检查消息或枚举声明是否需要注释
+            message_match = re.match(r'^(\s*)(message|enum)\s+(\w+)\s*\{', line)
+            if message_match:
+                indent = message_match.group(1)
+                def_type = message_match.group(2)
+                name = message_match.group(3)
+                
+                if self._is_obfuscated_field(name):
+                    result_lines.append(f"{indent}// {line.strip()}")
+                else:
+                    result_lines.append(line)
+                continue
+            
+            # 检查 import 语句
+            import_match = re.match(r'^(\s*)import\s+"([^"]+)";', line)
+            if import_match:
+                indent = import_match.group(1)
+                import_file = import_match.group(2)
+                # 从文件名提取类型名（去掉.proto后缀）
+                type_name = import_file.replace('.proto', '')
+                
+                if self._is_obfuscated_field(type_name):
+                    result_lines.append(f"{indent}// {line.strip()}")
+                else:
+                    result_lines.append(line)
+                continue
+            
+            # 检查是否在枚举定义内部
+            if self._is_inside_enum_definition(lines, i):
+                # 如果在枚举定义内部，直接保留，不做混淆检查
+                result_lines.append(line)
+                continue
+            
+            # 检查字段定义
+            if '=' in stripped and stripped.endswith(';'):
+                # 获取行的缩进
+                indent = line[:len(line) - len(line.lstrip())]
+                
+                # 检查 map 类型字段
+                map_match = self.map_pattern.match(stripped)
+                if map_match:
+                    key_type = map_match.group(1)
+                    value_type = map_match.group(2)
+                    field_name = map_match.group(3)
+                    
+                    # 检查是否有任何部分是混淆的
+                    if (self._is_obfuscated_field(key_type) or 
+                        self._is_obfuscated_field(value_type) or 
+                        self._is_obfuscated_field(field_name)):
+                        result_lines.append(f"{indent}// {stripped}")
+                    else:
+                        result_lines.append(line)
+                    continue
+                
+                # 检查普通字段
+                field_match = self.field_pattern.match(stripped)
+                if field_match:
+                    field_type = field_match.group(1)
+                    field_name = field_match.group(2)
+                    
+                    # 检查字段类型和名称是否混淆
+                    if (self._is_obfuscated_field(field_type) or 
+                        self._is_obfuscated_field(field_name)):
+                        result_lines.append(f"{indent}// {stripped}")
+                    else:
+                        result_lines.append(line)
+                    continue
+            
+            # 对于其他行，检查是否包含混淆的标识符
+            words = re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', stripped)
+            has_obfuscated_word = False
+            
+            for word in words:
+                if self._is_obfuscated_field(word):
+                    has_obfuscated_word = True
+                    break
+            
+            if has_obfuscated_word:
+                indent = line[:len(line) - len(line.lstrip())]
+                result_lines.append(f"{indent}// {stripped}")
+            else:
+                result_lines.append(line)
+        
+        return '\n'.join(result_lines)
+    
+    def _process_proto_content(self, content: str) -> str:
+        """处理proto文件内容，注释掉混淆字段"""
+        lines = content.split('\n')
+        result_lines = []
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('//'):
+                result_lines.append(line)
+                continue
+            
+            # 检查是否在枚举定义内部
+            if self._is_inside_enum_definition(lines, i):
+                # 如果在枚举定义内部，直接保留
+                result_lines.append(line)
+                continue
+            
+            # 检查是否为字段定义行
+            if '=' in stripped and stripped.endswith(';'):
+                # 尝试匹配map类型
+                map_match = self.map_pattern.match(stripped)
+                if map_match:
+                    key_type = map_match.group(1)
+                    value_type = map_match.group(2)
+                    field_name = map_match.group(3)
+                    
+                    # 检查是否有混淆
+                    if (self._is_obfuscated_field(key_type) or 
+                        self._is_obfuscated_field(value_type) or 
+                        self._is_obfuscated_field(field_name)):
+                        result_lines.append(f"    // {stripped}")
+                    else:
+                        result_lines.append(line)
+                else:
+                    # 匹配普通字段
+                    field_match = self.field_pattern.match(stripped)
+                    if field_match:
+                        field_type = field_match.group(1)
+                        field_name = field_match.group(2)
+                        
+                        # 检查是否有混淆
+                        if (self._is_obfuscated_field(field_type) or 
+                            self._is_obfuscated_field(field_name)):
+                            result_lines.append(f"    // {stripped}")
+                        else:
+                            result_lines.append(line)
+                    else:
+                        result_lines.append(line)
+            else:
+                result_lines.append(line)
+        
+        return '\n'.join(result_lines)
+    
     def _has_obfuscated_fields(self, body: str) -> bool:
-        """检查消息体中是否有混淆字段"""
+        """检查消息体中是否有混淆字段（枚举不检查内容）"""
         for line in body.split('\n'):
             line = line.strip()
             if not line or line.startswith('//'):
@@ -108,13 +300,20 @@ class GenshinProtoSplitter:
         return False
     
     def _comment_out_obfuscated_fields(self, body: str) -> str:
-        """注释掉消息体中的混淆字段"""
+        """注释掉消息体中的混淆字段（枚举内容不处理）"""
         lines = body.split('\n')
         result_lines = []
         
         for line in lines:
             stripped = line.strip()
             if not stripped or stripped.startswith('//'):
+                result_lines.append(line)
+                continue
+            
+            # 检查是否为枚举值定义（枚举值不进行混淆检查）
+            enum_value_match = re.match(r'^(\s*)(\w+)\s*=\s*\d+;', stripped)
+            if enum_value_match:
+                # 枚举值直接保留，不检查混淆
                 result_lines.append(line)
                 continue
             
@@ -130,7 +329,7 @@ class GenshinProtoSplitter:
                     self._is_obfuscated_field(value_type) or 
                     self._is_obfuscated_field(field_name)):
                     
-                    result_lines.append(f"    // {stripped}  // 混淆字段")
+                    result_lines.append(f"    // {stripped}")
                 else:
                     result_lines.append(line)
             else:
@@ -144,7 +343,7 @@ class GenshinProtoSplitter:
                     if (self._is_obfuscated_field(field_type) or 
                         self._is_obfuscated_field(field_name)):
                         
-                        result_lines.append(f"    // {stripped}  // 混淆字段")
+                        result_lines.append(f"    // {stripped}")
                     else:
                         result_lines.append(line)
                 else:
@@ -217,7 +416,6 @@ class GenshinProtoSplitter:
         return required_types
     
     def parse_proto_file(self) -> None:
-        print("开始解析proto文件...")
         content = self._read_file_with_encoding(self.input_file)
         
         # 解析头部信息
@@ -244,8 +442,6 @@ class GenshinProtoSplitter:
         # 第二次遍历：解析定义
         self._parse_definitions(content)
         
-        print(f"解析完成，找到 {len(self.definitions)} 个定义")
-    
     def _collect_all_message_names(self, content: str) -> None:
         """收集所有消息和枚举名称"""
         # 查找所有message定义
@@ -257,8 +453,6 @@ class GenshinProtoSplitter:
         enum_matches = re.findall(r'^\s*enum\s+(\w+)\s*\{', content, re.MULTILINE)
         for name in enum_matches:
             self.all_message_names.add(name)
-        
-        print(f"收集到 {len(self.all_message_names)} 个消息/枚举名称")
     
     def _parse_definitions(self, content: str) -> None:
         lines = content.split('\n')
@@ -324,10 +518,15 @@ class GenshinProtoSplitter:
         
         # 判断是否为混淆消息
         is_obfuscated_message = self._is_obfuscated_field(name)
-        has_obfuscated_fields = self._has_obfuscated_fields(body)
         
-        # 处理混淆字段
-        if has_obfuscated_fields or is_obfuscated_message:
+        # 对于枚举，只检查名称是否混淆，不检查内容
+        if def_type == 'enum':
+            has_obfuscated_fields = False
+        else:
+            has_obfuscated_fields = self._has_obfuscated_fields(body)
+        
+        # 处理混淆字段（枚举内容不处理）
+        if has_obfuscated_fields or (is_obfuscated_message and def_type == 'message'):
             body = self._comment_out_obfuscated_fields(body)
         
         # 提取需要导入的类型
@@ -422,10 +621,8 @@ class GenshinProtoSplitter:
     def create_output_structure(self) -> None:
         self.version_dir.mkdir(parents=True, exist_ok=True)
         self.protocol_dir.mkdir(parents=True, exist_ok=True)
-        print(f"创建输出目录: {self.protocol_dir}")
     
     def generate_proto_files(self) -> None:
-        print("开始生成proto文件...")
         extension = self.config["proto_file_extension"]
         output_encoding = self.config["encoding"]["output"]
         overwrite = self.config["output"]["overwrite_existing"]
@@ -438,8 +635,14 @@ class GenshinProtoSplitter:
         name_to_definition = {d['name']: d for d in self.definitions}
         
         for definition in self.definitions:
-            # 跳过混淆消息（按配置）
-            if definition['is_obfuscated']:
+            # 对于枚举，如果名称是混淆的就跳过不生成
+            if definition['is_enum'] and definition['is_obfuscated']:
+                skip_count += 1
+                print(f"跳过混淆枚举: {definition['name']}")
+                continue
+            
+            # 对于消息，按原有逻辑处理
+            if not definition['is_enum'] and definition['is_obfuscated']:
                 if not self.config.get("obfuscation", {}).get("split_obfuscated_by_default", False):
                     skip_count += 1
                     continue
@@ -451,20 +654,6 @@ class GenshinProtoSplitter:
                 continue
             
             content_parts = []
-            
-            # 添加头部注释
-            if definition['cmd_id']:
-                comment = f"// {definition['name']} - CmdId: {definition['cmd_id']}"
-                if definition['is_obfuscated']:
-                    comment += " (混淆字段)"
-                content_parts.append(comment)
-            else:
-                comment = f"// {definition['name']} - {definition['message_type']}"
-                if definition['is_obfuscated']:
-                    comment += " (混淆字段)"
-                content_parts.append(comment)
-            
-            content_parts.append("")
             
             # 添加syntax
             if self.syntax:
@@ -503,17 +692,12 @@ class GenshinProtoSplitter:
                     
                     # 根据混淆状态决定是否注释
                     if is_obfuscated_import and self.config.get("obfuscation", {}).get("comment_obfuscated_definitions", True):
-                        content_parts.append(f'// import "{import_filename}"; // 混淆类型')
+                        content_parts.append(f'// import "{import_filename}";')
                     else:
                         content_parts.append(f'import "{import_filename}";')
                 
                 if import_list:
                     content_parts.append("")
-                    print(f"为 {definition['name']} 添加导入: {', '.join(import_list)}")
-            
-            # 添加注释
-            if definition['comments'] and self.config["parsing"]["preserve_comments"]:
-                content_parts.extend(definition['comments'])
             
             # 添加定义内容
             if definition['is_obfuscated'] and self.config.get("obfuscation", {}).get("comment_obfuscated_definitions", True):
@@ -523,24 +707,33 @@ class GenshinProtoSplitter:
             else:
                 content_parts.append(definition['full_definition'])
             
+            # 组合初始内容
+            initial_content = '\n'.join(content_parts)
+            
+            # *** 关键修改：对生成的整个文件内容进行最终检查和处理 ***
+            final_content = self._process_generated_proto_content(initial_content)
+            
             # 写入文件
             try:
                 with open(filepath, 'w', encoding=output_encoding) as f:
-                    f.write('\n'.join(content_parts))
+                    f.write(final_content)
                 split_count += 1
+                
+                # 输出调试信息
+                print(f"生成文件: {filename}")
+                if initial_content != final_content:
+                    print(f"  -> 检测到混淆内容，已自动注释")
+                    
             except Exception as e:
                 print(f"写入文件失败 {filepath}: {e}")
         
-        print(f"分割了 {split_count} 个proto文件")
-        print(f"跳过了 {skip_count} 个混淆字段")
-        print(f"注释了 {commented_count} 个混淆字段定义")
+        print(f"\n生成完成: {split_count} 个文件, 跳过 {skip_count} 个混淆文件, 注释 {commented_count} 个混淆定义")
     
     def generate_java_opcodes(self) -> None:
         """生成Java格式的PacketOpcodes.java文件"""
         if not self.config.get("output", {}).get("generate_java_opcodes", True):
             return
         
-        print("生成Java opcodes文件...")
         output_encoding = self.config["encoding"]["output"]
         java_config = self.config.get("java_format", {})
         
@@ -574,8 +767,6 @@ class GenshinProtoSplitter:
                         f.write(f"    {field_modifier} {definition['name']} = {definition['cmd_id']};\n")
                 
                 f.write("}\n")
-            
-            print(f"生成Java文件: {self.java_file}")
         except Exception as e:
             print(f"生成Java文件失败: {e}")
     
@@ -583,25 +774,10 @@ class GenshinProtoSplitter:
         if not os.path.exists(self.input_file):
             raise FileNotFoundError(f"输入文件不存在: {self.input_file}")
         
-        print(f"输入文件: {self.input_file}")
-        print(f"输出目录: {self.version_dir}")
-        
         self.parse_proto_file()
         self.create_output_structure()
         self.generate_proto_files()
         self.generate_java_opcodes()
-        
-        print("\n=== 处理完成 ===")
-        print(f"总共处理了 {len(self.definitions)} 个定义")
-        
-        # 统计信息
-        cmd_count = sum(1 for d in self.definitions if d['cmd_id'])
-        enum_count = sum(1 for d in self.definitions if d['is_enum'])
-        obfuscated_count = sum(1 for d in self.definitions if d['is_obfuscated'])
-        
-        print(f"CMD消息: {cmd_count} 个")
-        print(f"枚举定义: {enum_count} 个")
-        print(f"混淆字段: {obfuscated_count} 个")
 
 
 def main():
@@ -638,7 +814,6 @@ def main():
         return 0
         
     except KeyboardInterrupt:
-        print("\n用户中断操作")
         return 1
     except Exception as e:
         print(f"错误: {e}")
@@ -647,3 +822,5 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
+            
+            # 添加定义
