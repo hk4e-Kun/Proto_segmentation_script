@@ -25,6 +25,9 @@ class GenshinProtoSplitter:
         self.package_name: str = ""
         self.syntax: str = ""
         self.all_message_names: Set[str] = set()
+        self.top_level_messages: Set[str] = set()
+        # 新增：存储所有将要生成的proto文件名
+        self.generated_proto_files: Set[str] = set()
         
         self.message_pattern = re.compile(self.config["parsing"]["message_name_pattern"])
         self.enum_pattern = re.compile(self.config["parsing"]["enum_name_pattern"])
@@ -116,6 +119,24 @@ class GenshinProtoSplitter:
         
         return False
     
+    def _is_inside_oneof_definition(self, lines: List[str], line_index: int) -> bool:
+        """判断当前行是否在oneof定义内部"""
+        brace_count = 0
+        for i in range(line_index, -1, -1):
+            line = lines[i].strip()
+            if not line or line.startswith('//'):
+                continue
+            
+            brace_count += line.count('}') - line.count('{')
+            
+            if re.match(r'^\s*oneof\s+\w+\s*\{', line):
+                return brace_count <= 0
+            
+            if re.match(r'^\s*(message|enum)\s+\w+\s*\{', line):
+                return False
+        
+        return False
+    
     def _is_line_commented(self, line: str) -> bool:
         return line.strip().startswith('//')
     
@@ -160,30 +181,13 @@ class GenshinProtoSplitter:
                 def_type = message_match.group(2)
                 name = message_match.group(3)
                 
+                # 如果message/enum名称是混淆字段，跳过不注释该行
                 if self._is_obfuscated_field(name):
-                    commented_line = f"{indent}// {line.strip()}"
-                    result_lines.append(commented_line)
-                    
-                    if def_type == 'message':
-                        start_line, end_line = self._find_message_block_bounds(lines, i)
-                        
-                        for j in range(i + 1, end_line + 1):
-                            block_line = lines[j]
-                            if block_line.strip():
-                                block_indent = block_line[:len(block_line) - len(block_line.lstrip())]
-                                result_lines.append(f"{block_indent}// {block_line.strip()}")
-                            else:
-                                result_lines.append("//")
-                        
-                        i = end_line + 1
-                        continue
-                    else:
-                        i += 1
-                        continue
+                    result_lines.append(line)  # 保留原行不注释
                 else:
                     result_lines.append(line)
-                    i += 1
-                    continue
+                i += 1
+                continue
             
             import_match = re.match(r'^(\s*)import\s+"([^"]+)";', line)
             if import_match:
@@ -196,6 +200,56 @@ class GenshinProtoSplitter:
                 else:
                     result_lines.append(line)
                 i += 1
+                continue
+            
+            # 处理oneof定义
+            if re.match(r'^\s*oneof\s+\w+\s*\{', stripped):
+                # oneof定义行本身不做混淆判断，直接保留
+                result_lines.append(line)
+                i += 1
+                
+                # 处理oneof内部字段
+                brace_count = 1
+                while i < len(lines) and brace_count > 0:
+                    current_line = lines[i]
+                    current_stripped = current_line.strip()
+                    
+                    # 计算花括号平衡
+                    brace_count += current_stripped.count('{') - current_stripped.count('}')
+                    
+                    if brace_count == 0:
+                        # oneof结束花括号
+                        result_lines.append(current_line)
+                        i += 1
+                        break
+                    
+                    # 检查oneof内部字段是否混淆
+                    if (current_stripped and 
+                        not current_stripped.startswith('//') and 
+                        not current_stripped.startswith('/*') and
+                        not current_stripped.startswith('*') and
+                        '=' in current_stripped and
+                        current_stripped.endswith(';')):
+                        
+                        # 检查是否为混淆字段
+                        field_match = self.field_pattern.match(current_stripped)
+                        if field_match:
+                            field_type = field_match.group(1)
+                            field_name = field_match.group(2)
+                            
+                            if (self._is_obfuscated_field(field_type) or 
+                                self._is_obfuscated_field(field_name)):
+                                # 注释掉混淆字段
+                                indent = current_line[:len(current_line) - len(current_line.lstrip())]
+                                result_lines.append(f"{indent}// {current_stripped}")
+                            else:
+                                result_lines.append(current_line)
+                        else:
+                            result_lines.append(current_line)
+                    else:
+                        result_lines.append(current_line)
+                    
+                    i += 1
                 continue
             
             if self._is_inside_enum_definition(lines, i):
@@ -255,15 +309,82 @@ class GenshinProtoSplitter:
     def _process_proto_content(self, content: str) -> str:
         lines = content.split('\n')
         result_lines = []
+        i = 0
         
-        for i, line in enumerate(lines):
+        while i < len(lines):
+            line = lines[i]
             stripped = line.strip()
+            
             if not stripped or stripped.startswith('//'):
                 result_lines.append(line)
+                i += 1
+                continue
+            
+            # 处理oneof定义
+            if re.match(r'^\s*oneof\s+\w+\s*\{', stripped):
+                # oneof定义行本身不做混淆判断，直接保留
+                result_lines.append(line)
+                i += 1
+                
+                # 处理oneof内部字段
+                brace_count = 1
+                while i < len(lines) and brace_count > 0:
+                    current_line = lines[i]
+                    current_stripped = current_line.strip()
+                    
+                    # 计算花括号平衡
+                    brace_count += current_stripped.count('{') - current_stripped.count('}')
+                    
+                    if brace_count == 0:
+                        # oneof结束花括号
+                        result_lines.append(current_line)
+                        i += 1
+                        break
+                    
+                    # 检查oneof内部字段是否混淆
+                    if (current_stripped and 
+                        not current_stripped.startswith('//') and 
+                        not current_stripped.startswith('/*') and
+                        not current_stripped.startswith('*') and
+                        '=' in current_stripped and
+                        current_stripped.endswith(';')):
+                        
+                        # 检查map类型
+                        map_match = self.map_pattern.match(current_stripped)
+                        if map_match:
+                            key_type = map_match.group(1)
+                            value_type = map_match.group(2)
+                            field_name = map_match.group(3)
+                            
+                            if (self._is_obfuscated_field(key_type) or 
+                                self._is_obfuscated_field(value_type) or 
+                                self._is_obfuscated_field(field_name)):
+                                result_lines.append(f"    // {current_stripped}")
+                            else:
+                                result_lines.append(current_line)
+                        else:
+                            # 检查普通字段
+                            field_match = self.field_pattern.match(current_stripped)
+                            if field_match:
+                                field_type = field_match.group(1)
+                                field_name = field_match.group(2)
+                                
+                                if (self._is_obfuscated_field(field_type) or 
+                                    self._is_obfuscated_field(field_name)):
+                                    result_lines.append(f"    // {current_stripped}")
+                                else:
+                                    result_lines.append(current_line)
+                            else:
+                                result_lines.append(current_line)
+                    else:
+                        result_lines.append(current_line)
+                    
+                    i += 1
                 continue
             
             if self._is_inside_enum_definition(lines, i):
                 result_lines.append(line)
+                i += 1
                 continue
             
             if '=' in stripped and stripped.endswith(';'):
@@ -294,6 +415,8 @@ class GenshinProtoSplitter:
                         result_lines.append(line)
             else:
                 result_lines.append(line)
+            
+            i += 1
         
         return '\n'.join(result_lines)
     
@@ -313,16 +436,83 @@ class GenshinProtoSplitter:
     def _comment_out_obfuscated_fields(self, body: str) -> str:
         lines = body.split('\n')
         result_lines = []
+        i = 0
         
-        for line in lines:
+        while i < len(lines):
+            line = lines[i]
             stripped = line.strip()
+            
             if not stripped or stripped.startswith('//'):
                 result_lines.append(line)
+                i += 1
+                continue
+            
+            # 处理oneof定义
+            if re.match(r'^\s*oneof\s+\w+\s*\{', stripped):
+                # oneof定义行本身不做混淆判断，直接保留
+                result_lines.append(line)
+                i += 1
+                
+                # 处理oneof内部字段
+                brace_count = 1
+                while i < len(lines) and brace_count > 0:
+                    current_line = lines[i]
+                    current_stripped = current_line.strip()
+                    
+                    # 计算花括号平衡
+                    brace_count += current_stripped.count('{') - current_stripped.count('}')
+                    
+                    if brace_count == 0:
+                        # oneof结束花括号
+                        result_lines.append(current_line)
+                        i += 1
+                        break
+                    
+                    # 检查oneof内部字段是否混淆
+                    if (current_stripped and 
+                        not current_stripped.startswith('//') and 
+                        not current_stripped.startswith('/*') and
+                        not current_stripped.startswith('*') and
+                        '=' in current_stripped and
+                        current_stripped.endswith(';')):
+                        
+                        # 检查map类型
+                        map_match = self.map_pattern.match(current_stripped)
+                        if map_match:
+                            key_type = map_match.group(1)
+                            value_type = map_match.group(2)
+                            field_name = map_match.group(3)
+                            
+                            if (self._is_obfuscated_field(key_type) or 
+                                self._is_obfuscated_field(value_type) or 
+                                self._is_obfuscated_field(field_name)):
+                                result_lines.append(f"    // {current_stripped}")
+                            else:
+                                result_lines.append(current_line)
+                        else:
+                            # 检查普通字段
+                            field_match = self.field_pattern.match(current_stripped)
+                            if field_match:
+                                field_type = field_match.group(1)
+                                field_name = field_match.group(2)
+                                
+                                if (self._is_obfuscated_field(field_type) or 
+                                    self._is_obfuscated_field(field_name)):
+                                    result_lines.append(f"    // {current_stripped}")
+                                else:
+                                    result_lines.append(current_line)
+                            else:
+                                result_lines.append(current_line)
+                    else:
+                        result_lines.append(current_line)
+                    
+                    i += 1
                 continue
             
             enum_value_match = re.match(r'^(\s*)(\w+)\s*=\s*\d+;', stripped)
             if enum_value_match:
                 result_lines.append(line)
+                i += 1
                 continue
             
             map_match = self.map_pattern.match(stripped)
@@ -352,6 +542,8 @@ class GenshinProtoSplitter:
                         result_lines.append(line)
                 else:
                     result_lines.append(line)
+            
+            i += 1
         
         return '\n'.join(result_lines)
     
@@ -368,8 +560,10 @@ class GenshinProtoSplitter:
         return '\n'.join(commented_lines)
     
     def _extract_required_imports(self, body: str) -> Set[str]:
+        """修复后的方法：提取所有首字母大写的类型名"""
         required_types = set()
         
+        # 基本类型，不需要导入
         basic_types = {
             'int32', 'int64', 'uint32', 'uint64', 'sint32', 'sint64',
             'fixed32', 'fixed64', 'sfixed32', 'sfixed64', 'float', 'double',
@@ -381,32 +575,75 @@ class GenshinProtoSplitter:
             if not line or line.startswith('//'):
                 continue
             
+            # 处理 map 类型
             map_match = self.map_pattern.match(line)
             if map_match:
                 key_type = map_match.group(1)
                 value_type = map_match.group(2)
                 
+                # 检查 key 类型
                 if (key_type not in basic_types and 
                     key_type[0].isupper() and 
-                    key_type in self.all_message_names):
+                    re.match(r'^[A-Z][a-zA-Z0-9_]*$', key_type)):
                     required_types.add(key_type)
                 
+                # 检查 value 类型
                 if (value_type not in basic_types and 
                     value_type[0].isupper() and 
-                    value_type in self.all_message_names):
+                    re.match(r'^[A-Z][a-zA-Z0-9_]*$', value_type)):
                     required_types.add(value_type)
                 continue
             
+            # 处理普通字段类型
             type_match = self.type_pattern.match(line)
             if type_match:
                 field_type = type_match.group(1)
                 
+                # 检查是否是自定义类型（首字母大写，非基本类型）
                 if (field_type not in basic_types and 
                     field_type[0].isupper() and 
-                    field_type in self.all_message_names):
+                    re.match(r'^[A-Z][a-zA-Z0-9_]*$', field_type)):
                     required_types.add(field_type)
         
         return required_types
+    
+    def _prepare_generated_proto_files(self) -> None:
+        """准备将要生成的proto文件名集合"""
+        self.generated_proto_files.clear()
+        extension = self.config["proto_file_extension"]
+        
+        for definition in self.definitions:
+            # 跳过被混淆的枚举
+            if definition['is_enum'] and definition['is_obfuscated']:
+                continue
+            
+            # 跳过被混淆的消息（如果配置不分割混淆消息）
+            if not definition['is_enum'] and definition['is_obfuscated']:
+                if not self.config.get("obfuscation", {}).get("split_obfuscated_by_default", False):
+                    continue
+            
+            # 添加到将要生成的文件集合
+            filename = f"{definition['name']}{extension}"
+            self.generated_proto_files.add(filename)
+    
+    def _validate_imports_against_generated_files(self, required_imports: Set[str]) -> Set[str]:
+        """修复后的方法：根据将要生成的proto文件验证导入"""
+        valid_imports = set()
+        extension = self.config["proto_file_extension"]
+        
+        for import_type in required_imports:
+            proto_filename = f"{import_type}{extension}"
+            
+            # 检查是否在将要生成的文件列表中
+            if proto_filename in self.generated_proto_files:
+                valid_imports.add(import_type)
+            else:
+                # 检查是否已经存在于输出目录中
+                proto_file = self.protocol_dir / proto_filename
+                if proto_file.exists():
+                    valid_imports.add(import_type)
+        
+        return valid_imports
     
     def parse_proto_file(self) -> None:
         content = self._read_file_with_encoding(self.input_file)
@@ -432,13 +669,38 @@ class GenshinProtoSplitter:
         self._parse_definitions(content)
         
     def _collect_all_message_names(self, content: str) -> None:
-        message_matches = re.findall(r'^\s*message\s+(\w+)\s*\{', content, re.MULTILINE)
-        for name in message_matches:
-            self.all_message_names.add(name)
+        lines = content.split('\n')
+        brace_depth = 0
         
-        enum_matches = re.findall(r'^\s*enum\s+(\w+)\s*\{', content, re.MULTILINE)
-        for name in enum_matches:
-            self.all_message_names.add(name)
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('//'):
+                continue
+            
+            if brace_depth == 0:
+                message_match = re.match(r'^\s*message\s+(\w+)\s*\{', line)
+                if message_match:
+                    name = message_match.group(1)
+                    self.all_message_names.add(name)
+                    self.top_level_messages.add(name)
+                
+                enum_match = re.match(r'^\s*enum\s+(\w+)\s*\{', line)
+                if enum_match:
+                    name = enum_match.group(1)
+                    self.all_message_names.add(name)
+                    self.top_level_messages.add(name)
+            else:
+                message_match = re.match(r'^\s*message\s+(\w+)\s*\{', line)
+                if message_match:
+                    name = message_match.group(1)
+                    self.all_message_names.add(name)
+                
+                enum_match = re.match(r'^\s*enum\s+(\w+)\s*\{', line)
+                if enum_match:
+                    name = enum_match.group(1)
+                    self.all_message_names.add(name)
+            
+            brace_depth += line.count('{') - line.count('}')
     
     def _parse_definitions(self, content: str) -> None:
         lines = content.split('\n')
@@ -603,6 +865,9 @@ class GenshinProtoSplitter:
         output_encoding = self.config["encoding"]["output"]
         overwrite = self.config["output"]["overwrite_existing"]
         
+        # 首先准备将要生成的proto文件名集合
+        self._prepare_generated_proto_files()
+        
         split_count = 0
         skip_count = 0
         commented_count = 0
@@ -645,8 +910,11 @@ class GenshinProtoSplitter:
                 content_parts.extend(self.imports)
                 content_parts.append("")
             
+            # 处理导入：现在使用修复后的方法
             if definition.get('required_imports'):
-                import_list = sorted(definition['required_imports'])
+                raw_imports = definition['required_imports']
+                valid_imports = self._validate_imports_against_generated_files(raw_imports)
+                import_list = sorted(valid_imports)
                 
                 for import_type in import_list:
                     import_filename = f"{import_type}{extension}"
@@ -679,11 +947,15 @@ class GenshinProtoSplitter:
                 with open(filepath, 'w', encoding=output_encoding) as f:
                     f.write(final_content)
                 split_count += 1
+                
+                print(f"Generated: {filename}")
+                if initial_content != final_content:
+                    print(f"  -> Obfuscated content detected and commented")
                     
             except Exception as e:
-                pass
+                print(f"Write failed {filepath}: {e}")
         
-        pass
+        print(f"\nGenerated: {split_count} files, skipped {skip_count} obfuscated files, commented {commented_count} obfuscated definitions")
     
     def generate_java_opcodes(self) -> None:
         if not self.config.get("output", {}).get("generate_java_opcodes", True):
@@ -718,7 +990,7 @@ class GenshinProtoSplitter:
                 
                 f.write("}\n")
         except Exception as e:
-            pass
+            print(f"Java file generation failed: {e}")
     
     def run(self) -> None:
         if not os.path.exists(self.input_file):
@@ -731,11 +1003,11 @@ class GenshinProtoSplitter:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Proto file splitter")
-    parser.add_argument("-c", "--config", default="config.json", help="Config file path")
-    parser.add_argument("-i", "--input", help="Input proto file path")
-    parser.add_argument("-o", "--output", help="Output directory path")
-    parser.add_argument("-v", "--version", help="Version identifier")
+    parser = argparse.ArgumentParser(description="原神Proto文件分割工具")
+    parser.add_argument("-c", "--config", default="config.json", help="配置文件路径")
+    parser.add_argument("-i", "--input", help="输入proto文件路径")
+    parser.add_argument("-o", "--output", help="输出目录路径")
+    parser.add_argument("-v", "--version", help="版本标识")
     
     args = parser.parse_args()
     
@@ -772,3 +1044,5 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
+
+                    
