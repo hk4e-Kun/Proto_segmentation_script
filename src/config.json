@@ -1,15 +1,17 @@
 {
   "target_files": [
-    "example.txt",
+    "Genshin6.1.proto",
     "source_code.h",
     "data_file.proto"
   ],
-  "rules_file": "rules.txt",
+  "rules_file": "nameTranslationMerged.txt",
   "backup_files": true,
   "case_sensitive": true,
   "output_suffix": "_replaced",
   "output_extension": null,
-  "max_workers": 8,
+  "max_workers": 20,
+  "fix_proto_field_type": true,
+  "replace_in_enum": true,
   "_comments": {
     "target_files": "需要处理的目标文件列表",
     "rules_file": "替换规则文件的路径，格式为：原字符串 替换字符串",
@@ -17,6 +19,8 @@
     "case_sensitive": "是否区分大小写进行替换",
     "output_suffix": "输出文件的后缀名，会加在原文件名后面，例如：source_code.h -> source_code_replaced.h",
     "output_extension": "输出文件的扩展名：null=使用原文件扩展名，txt=统一使用.txt扩展名，cpp=统一使用.cpp扩展名",
-    "max_workers": "最大工作线程数，建议设置为CPU核心数的1-2倍，默认为4"
+    "max_workers": "最大工作进程数（多进程并行），建议设置为CPU核心数的1-1.5倍。16核CPU推荐20-24，32核CPU推荐40-48",
+    "fix_proto_field_type": "是否修复proto字段类型错误并清理消息名前缀。智能跳过混淆名称（全大写），只处理正常命名（如ToTheMoonObstacleInfo），大幅提升速度",
+    "replace_in_enum": "是否替换enum花括号内的枚举内容，false=跳过枚举内部，true=也替换枚举内部"
   }
 }
