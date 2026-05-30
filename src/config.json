@@ -3,16 +3,30 @@
   "version": "v5.0.0",
   "output_directory": "output",
   "protocol_subdirectory": "protocol",
-  "csv_filename": "protocol.csv",
+  "java_filename": "PacketOpcodes.java",
   "proto_file_extension": ".proto",
   "encoding": {
     "input": ["utf-8", "gbk", "latin-1"],
     "output": "utf-8"
   },
-  "csv_format": {
-    "header": true,
-    "delimiter": ",",
-    "fields": ["message_name", "cmd_id"]
+  "java_format": {
+    "class_name": "PacketOpcodes",
+    "access_modifier": "public",
+    "field_modifier": "public static final int",
+    "include_package": false,
+    "package_name": "emu.grasscutter.net.packet"
+  },
+  "proto_format": {
+    "java_package": "emu.grasscutter.net.proto",
+    "add_java_package_option": true
+  },
+  "obfuscation": {
+    "min_consecutive_uppercase": 5,
+    "split_obfuscated_by_default": false,
+    "split_required_dependencies": true,
+    "exclude_patterns": [],
+    "include_patterns": [],
+    "comment_obfuscated_definitions": true
   },
   "parsing": {
     "preserve_comments": true,
@@ -35,6 +49,9 @@
   "output": {
     "create_empty_files": false,
     "overwrite_existing": true,
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "generate_proto_files": true,
+    "generate_java_opcodes": true,
+    "sort_opcodes_by_id": true
   }
 }
